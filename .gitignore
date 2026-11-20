@@ -1,0 +1,28 @@
+# Runtime inputs, credentials, evidence, and pre-Go implementation (local only).
+.env
+.env.*
+!.env.example
+/runtime/
+/state/
+oauth-client.json
+client_secret*.json
+auth_state.json
+.auth_state.json.*.tmp
+/local-evidence/
+/.local-reference/
+/.pytest_cache/
+*.jar
+*.class
+*.protoset
+*.pb
+*.pem
+*.key
+*.log
+
+# Builds and Go tooling.
+/asgemini2api
+/bin/
+/dist/
+/coverage.out
+*.test
+*.tar.gz

@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build-and-test:
+    name: Build, Vet & Race Test (Go ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go 1.26.11
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26.11"
+
+      - name: Verify native ARM64 runner and Go toolchain
+        run: |
+          test "$(uname -m)" = "aarch64"
+          go version | grep -F "go1.26.11"
+          go version | grep -F "linux/arm64"
+
+      - name: Verify dependencies and run go vet
+        run: |
+          go mod verify
+          go vet ./...
+
+      - name: Run race-enabled tests
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 ./...
+
+      - name: Build static ARM64 binary and inspect ELF
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w" -o dist/asgemini2api ./cmd/asgemini2api
+          file dist/asgemini2api
+          file dist/asgemini2api | grep -F "ARM aarch64"
+          file dist/asgemini2api | grep -E "statically linked|static-pie linked"
+          if links=$(ldd dist/asgemini2api 2>&1); then
+            printf '%s\n' "$links"
+            echo "Expected a static binary with no dynamic library dependencies"
+            exit 1
+          fi
+          printf '%s\n' "$links" | grep -F 'not a dynamic executable'
+          ./dist/asgemini2api --help
+
+      - name: Upload static ARM64 binary artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: asgemini2api-linux-arm64
+          path: dist/asgemini2api
+          if-no-files-found: error
+          retention-days: 14
+
+  docker-image:
+    name: Build & Inspect Tiny Container Image (ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate Compose configuration
+        run: docker compose -f compose.yaml config -q
+
+      - name: Build native ARM64 container image
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build --pull -t ghcr.io/ayatinene/asgemini2api:ci .
+
+      - name: Inspect image architecture, user, and filesystem hygiene
+        run: |
+          meta="$(docker image inspect ghcr.io/ayatinene/asgemini2api:ci --format '{{.Architecture}} {{.Os}} {{.Config.User}}')"
+          echo "Image metadata: $meta"
+          test "$meta" = "arm64 linux 1000:1000"
+
+          cid="$(docker create ghcr.io/ayatinene/asgemini2api:ci)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker export "$cid" | tar -tf - > /tmp/image-contents.txt
+          grep -Fx 'etc/ssl/certs/ca-certificates.crt' /tmp/image-contents.txt
+          grep -Fx 'usr/local/bin/asgemini2api' /tmp/image-contents.txt
+          if grep -Ev '^(\.dockerenv|dev/(console|pts/|shm/)?|proc/|sys/|etc/|etc/(group|passwd|hosts|hostname|mtab|resolv\.conf|nsswitch\.conf)|etc/ssl/|etc/ssl/certs/|etc/ssl/certs/ca-certificates\.crt|inputs/|state/|tmp/|usr/|usr/local/|usr/local/bin/|usr/local/bin/asgemini2api)$' /tmp/image-contents.txt; then
+            echo "Unexpected file found in runtime image"
+            exit 1
+          fi
+
+      - name: Smoke test container CLI without credentials or network
+        run: |
+          docker run --rm --network none ghcr.io/ayatinene/asgemini2api:ci --help
+          docker run --rm --network none ghcr.io/ayatinene/asgemini2api:ci status | grep -F '"client_config_error": "oauth_client_not_configured"'
+
+      - name: Save native ARM64 image archive
+        run: |
+          docker save ghcr.io/ayatinene/asgemini2api:ci | gzip -n > /tmp/asgemini2api-image-linux-arm64.tar.gz
+          ls -lh /tmp/asgemini2api-image-linux-arm64.tar.gz
+
+      - name: Upload native ARM64 image artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: asgemini2api-image-linux-arm64
+          path: /tmp/asgemini2api-image-linux-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-ghcr:
+    name: Publish Tested Tag Image to GHCR (ARM64)
+    needs:
+      - build-and-test
+      - docker-image
+    if: github.repository == 'ayatinene/ASGemini2API' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download tested native image
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: asgemini2api-image-linux-arm64
+          path: /tmp/asgemini2api-release
+
+      - name: Push exact tested image to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image=ghcr.io/ayatinene/asgemini2api
+          tag_version="$GITHUB_REF_NAME"
+          tag_sha="sha-${GITHUB_SHA::8}"
+          [[ "$tag_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-_.][A-Za-z0-9_.-]+)?$ ]]
+          docker load -i /tmp/asgemini2api-release/asgemini2api-image-linux-arm64.tar.gz
+          test "$(docker inspect --format '{{.Os}}/{{.Architecture}}' "${image}:ci")" = linux/arm64
+          docker tag "${image}:ci" "${image}:${tag_version}"
+          docker tag "${image}:ci" "${image}:${tag_sha}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "${image}:${tag_version}"
+          docker push "${image}:${tag_sha}"
