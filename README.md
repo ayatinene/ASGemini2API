@@ -314,3 +314,7 @@ magpie provider add 'ASGemini2API' url=http://127.0.0.1:8080/v1 key=<LOCAL_PROXY
 1. **`build-and-test`**：使用 Go `1.26.11` 执行 `go mod verify`、`go vet ./...`、`CGO_ENABLED=1 go test -race -count=1 ./...`，编译静态二进制 `dist/asgemini2api`，校验 ELF 静态链接并上传构建产物 `asgemini2api-linux-arm64`。
 2. **`docker-image`**：校验 `compose.yaml`，构建 `linux/arm64` `scratch` 镜像 `ghcr.io/ayatinene/asgemini2api:ci`，校验文件白名单并在 `--network none` 下执行 CLI 冒烟测试，上传镜像归档 `asgemini2api-image-linux-arm64`。
 3. **`publish-ghcr`**：推送 `v*` 标签且前序作业通过时，将镜像推送到 `ghcr.io/ayatinene/asgemini2api:<vTag>` 与 `ghcr.io/ayatinene/asgemini2api:sha-<8位提交号>`。
+
+## License
+
+Original code is licensed under the MIT License (see `LICENSE`). The Go bindings in `internal/aicode/pb/` are generated from Google's Android Studio AiCode descriptors; those protocol definitions remain Google's and are not covered by this license. Third-party dependencies are listed in `THIRD_PARTY_NOTICES.md`.
